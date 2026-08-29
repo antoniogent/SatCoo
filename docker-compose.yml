@@ -1,0 +1,32 @@
+
+
+services:
+  itu_postgres:
+    image: postgres:15-alpine
+    container_name: itu_postgres
+    environment:
+      POSTGRES_USER: itu_admin
+      POSTGRES_PASSWORD: supersecretpassword
+      POSTGRES_DB: itu_spectrum_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - itu_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  app:
+    build: .
+    container_name: itu_app
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app    # <--- Questo collega la tua cartella locale in tempo reale
+    environment:
+      - DATABASE_URL=postgresql://itu_admin:supersecretpassword@itu_postgres:5432/itu_spectrum_db
+    depends_on:
+      - itu_postgres
+    command: tail -f /dev/null
+    restart: unless-stopped
+
+volumes:
+  itu_pgdata:

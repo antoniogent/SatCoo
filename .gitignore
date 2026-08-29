@@ -1,0 +1,6 @@
+itu_data/
+*.mdb
+*.zip
+__pycache__/
+*.pyc
+.env
