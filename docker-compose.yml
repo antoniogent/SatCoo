@@ -25,7 +25,7 @@ services:
       - DATABASE_URL=postgresql://itu_admin:supersecretpassword@itu_postgres:5432/itu_spectrum_db
     depends_on:
       - itu_postgres
-    command: tail -f /dev/null
+    command: streamlit run app.py --server.address 0.0.0.0 --server.port 8501
     restart: unless-stopped
 
 volumes:

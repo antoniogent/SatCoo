@@ -4,6 +4,13 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine
 
+from supabase import create_client, Client
+
+SUPABASE_URL = "https://botdbymjqewmrixxqtmn.supabase.co"
+SUPABASE_KEY = "sb_publishable_9X5DeC5n92Nm1ib4bsLTYA_pwdiohEG"
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 # =========================================================================
 # PAGE CONFIGURATION
 # =========================================================================
@@ -12,6 +19,16 @@ st.set_page_config(
     page_icon="🛰️",
     layout="wide"
 )
+
+# Inizializzazione variabili di sessione per il routing
+if "page" not in st.session_state:
+    st.session_state.page = "main"
+
+if "user_authenticated" not in st.session_state:
+    st.session_state.user_authenticated = False
+
+if "user_email" not in st.session_state:
+    st.session_state.user_email = None
 
 # =========================================================================
 # CUSTOM CSS
@@ -34,6 +51,131 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
+# Area Utente nella Sidebar
+with st.sidebar:
+    st.markdown("---")
+    if st.session_state.get("user_authenticated", False):
+        user_email = st.session_state.get("user_email", "Utente")
+        st.success(f"👤 Signed In as: **{user_email}**")
+        
+        if st.button("🚪 Sign Out", type="secondary"):
+            st.session_state.user_authenticated = False
+            st.session_state.user_email = None
+            st.session_state.page = "main"
+            st.rerun()
+    else:
+        st.info("🔒 Status: Not Signed In")
+        col_login, col_signup = st.columns(2)
+        with col_login:
+            if st.button("Sign In"):
+                st.session_state.page = "signin"
+                st.rerun()
+        with col_signup:
+            if st.button("Sign Up"):
+                st.session_state.page = "signup"
+                st.rerun()
+    st.markdown("---")
+
+#=======================================================================
+#AUTHETICATION CONFIGURATION
+#======================================================================
+# 1. Sign In (Solo Email e Password)
+def render_sign_in_page():
+    st.title("🔑 Sign In")
+    st.info("Enter your credentials to access full analysis features.")
+
+    with st.form("signin_form"):
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Sign In")
+        if submit:
+            if email and password:
+                try:
+                    res = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                    st.session_state.user_authenticated = True
+                    st.session_state.user_email = res.user.email
+                    st.session_state.page = "main" 
+                    st.success("Successfully logged in!") 
+                    st.rerun()
+                except Exception as e:
+                    st.error("Invalid credentials or email not verified.")
+            else:
+                st.error("Please provide both email and password.")
+
+    st.write("Don't have an account?")
+    if st.button("Create a new account (Sign Up)"):
+        st.session_state.page = "signup"
+        st.rerun()
+
+    if st.button("Forgot Password?"):
+        st.session_state.page = "reset"
+        st.rerun()  
+
+    if st.button("⬅️ Back to Home"):
+        st.session_state.page = "main"
+        st.rerun()
+
+# 2. Sign Up (Form Completo)
+def render_sign_up_page():
+    st.title("📝 Sign Up")
+    st.info("Complete the registration form to create an account.")
+
+    with st.form("signup_form"):
+        nome = st.text_input("Full Name")
+        email = st.text_input("Email Address")
+        password = st.text_input("Password", type="password")
+        confirm_password = st.text_input("Confirm Password", type="password")
+        submit = st.form_submit_button("Sign Up")
+
+        if submit:
+            if email and password and password == confirm_password:
+                try:
+                    res = supabase.auth.sign_up({"email": email, "password": password})
+                    st.success("Account created! Check your email to confirm your account.")
+                except Exception as e:
+                    st.error(f"Registration failed: {e}")
+            elif password != confirm_password:
+                st.error("Passwords do not match.")
+            else:
+                st.error("Please fill in all required fields.")
+
+    st.write("Already have an account?")
+    if st.button("Go to Sign In"):
+        st.session_state.page = "signin"
+        st.rerun()
+
+    if st.button("⬅️ Back to Home"):
+        st.session_state.page = "main"
+        st.rerun()
+
+#3. Recupero Password
+def render_reset_password_page():
+    st.title("🔑 Reset Password")
+    st.info("Enter your email address and we'll send you a password reset link.")
+
+    with st.form("reset_form"):
+        email = st.text_input("Email Address")
+        submit = st.form_submit_button("Send Reset Link")
+
+        if submit:
+            if email:
+                try:
+                    # Invia la mail di recupero da Supabase
+                    supabase.auth.reset_password_email(
+                        email,
+                        options={"redirect_to": "http://IP_DEL_TUO_SERVER:8501"}
+                    )
+                    st.success("If the email is registered, a password reset link has been sent!")
+                except Exception as e:
+                    st.error(f"Error sending reset email: {e}")
+            else:
+                st.error("Please enter your email address.")
+
+    if st.button("⬅️ Back to Sign In"):
+        st.session_state.page = "signin"
+        st.rerun()
+
 
 # =========================================================================
 # DATABASE CONNECTION MANAGEMENT
@@ -80,7 +222,7 @@ selected_sat = None
 # =========================================================================
 if "Yes" in is_published:
     st.sidebar.subheader("🔍 Search Filing")
-    sat_search_name = st.sidebar.text_input("Satellite name as reported in filing", value="USASAT")
+    sat_search_name = st.sidebar.text_input("Satellite name as reported in filing", value="USASAT-30G")
     
     if sat_search_name:
         query_sat = """
@@ -179,93 +321,106 @@ else:
 # INTERFERENCE SEARCH EXECUTION
 # =========================================================================
 if st.button("🚀 Run Interference Screening", type="primary"):
-    if target_f_min is None or target_f_max is None or target_wic_no is None:
-        st.error("Invalid parameters or target satellite not selected.")
+# Controllo Registrazione Utente
+    if not st.session_state.get("user_authenticated", False):
+        st.session_state.page = "signin"
+        st.rerun()
     else:
-        if "Yes" in is_published:
-            wic_condition = "c.wic_no > %(wic_no)s AND c.sat_name != %(selected_sat)s"
-            params_dict = {
-                'f_min': target_f_min,
-                'f_max': target_f_max,
-                'wic_no': target_wic_no,
-                'selected_sat': selected_sat
-            }
+        # Se l'utente è autenticato, esegui l'analisi
+        if target_f_min is None or target_f_max is None or target_wic_no is None:
+            st.error("Invalid parameters or target satellite not selected.")
         else:
-            wic_condition = "c.wic_no >= %(wic_no)s"
-            params_dict = {
-                'f_min': target_f_min,
-                'f_max': target_f_max,
-                'wic_no': target_wic_no
-            }
+            if "Yes" in is_published:
+                wic_condition = "c.wic_no > %(wic_no)s AND c.sat_name != %(selected_sat)s"
+                params_dict = {
+                    'f_min': target_f_min,
+                    'f_max': target_f_max,
+                    'wic_no': target_wic_no,
+                    'selected_sat': selected_sat
+                }
+            else:
+                wic_condition = "c.wic_no >= %(wic_no)s"
+                params_dict = {
+                    'f_min': target_f_min,
+                    'f_max': target_f_max,
+                    'wic_no': target_wic_no
+                }
+            # Query raggruppata per singolo satellite senza total_overlapping_beams
+            query_interferers = f"""
+            SELECT
+                c.sat_name,
+                MAX(c.adm) AS adm,
+                MAX(c.wic_no) AS wic_no,                     
+                ROUND(AVG(f.freq_mhz)::numeric, 2) AS freq_mhz,
+                MIN(f.freq_min) AS freq_min,
+                MAX(f.freq_max) AS freq_max,
+                MAX(f.bdwdth) AS max_bw_mhz,           
+                MAX(b.gain) AS max_gain_dbi,
+                MAX(g.eirp_nom) AS max_eirp_dbw,
+                MIN(o.min_perig_km) AS min_perig_km,
+                MAX(o.max_perig_km) AS max_perig_km
+            FROM tbl_freq f
+            JOIN tbl_grp g ON f.grp_id = g.grp_id
+            JOIN tbl_com_el c ON g.ntc_id = c.ntc_id
+            LEFT JOIN (
+                SELECT ntc_id, MIN(perig_km) AS min_perig_km, MAX(perig_km) AS max_perig_km
+                FROM tbl_orbit GROUP BY ntc_id
+            ) o ON c.ntc_id = o.ntc_id
+            LEFT JOIN (
+                SELECT ntc_id, beam_name, MAX(gain) AS gain
+                FROM tbl_s_beam GROUP BY ntc_id, beam_name
+            ) b ON (g.ntc_id = b.ntc_id AND g.beam_name = b.beam_name)
+            WHERE f.freq_min <= %(f_max)s 
+               AND f.freq_max >= %(f_min)s
+               AND {wic_condition}
+            GROUP BY c.sat_name
+            ORDER BY MAX(c.wic_no) DESC;
+            """
         
-        # Query raggruppata per singolo satellite senza total_overlapping_beams
-        query_interferers = f"""
-        SELECT
-            c.sat_name,
-            MAX(c.adm) AS adm,
-            MAX(c.wic_no) AS wic_no,                     
-            ROUND(AVG(f.freq_mhz)::numeric, 2) AS freq_mhz,
-            MIN(f.freq_min) AS freq_min,
-            MAX(f.freq_max) AS freq_max,
-            MAX(f.bdwdth) AS max_bw_mhz,           
-            MAX(b.gain) AS max_gain_dbi,
-            MAX(g.eirp_nom) AS max_eirp_dbw,
-            MIN(o.min_perig_km) AS min_perig_km,
-            MAX(o.max_perig_km) AS max_perig_km
-        FROM tbl_freq f
-        JOIN tbl_grp g ON f.grp_id = g.grp_id
-        JOIN tbl_com_el c ON g.ntc_id = c.ntc_id
-        LEFT JOIN (
-            SELECT ntc_id, MIN(perig_km) AS min_perig_km, MAX(perig_km) AS max_perig_km
-            FROM tbl_orbit GROUP BY ntc_id
-        ) o ON c.ntc_id = o.ntc_id
-        LEFT JOIN (
-            SELECT ntc_id, beam_name, MAX(gain) AS gain
-            FROM tbl_s_beam GROUP BY ntc_id, beam_name
-        ) b ON (g.ntc_id = b.ntc_id AND g.beam_name = b.beam_name)
-        WHERE f.freq_min <= %(f_max)s 
-          AND f.freq_max >= %(f_min)s
-          AND {wic_condition}
-        GROUP BY c.sat_name
-        ORDER BY MAX(c.wic_no) DESC;
-        """
-        
-        with st.spinner("Executing spatial and frequency overlap analysis..."):
-            try:
-                df_results = pd.read_sql(query_interferers, con=engine, params=params_dict)
-                df_results = df_results.fillna("Not Available")
+            with st.spinner("Executing spatial and frequency overlap analysis..."):
+                try:
+                    df_results = pd.read_sql(query_interferers, con=engine, params=params_dict)
+                    df_results = df_results.fillna("Not Available")
                 
-                total_count = len(df_results)
+                    total_count = len(df_results)
                 
-                st.subheader("📊 Analysis Results")
+                    st.subheader("📊 Analysis Results")
                 
-                if total_count == 0:
-                    st.success("🎉 No potential interferers found for the given parameters!")
-                else:
-                    preview_count = max(1, math.ceil(total_count * 0.05))
-                    df_preview = df_results.head(preview_count)
+                    if total_count == 0:
+                        st.success("🎉 No potential interferers found for the given parameters!")
+                    else:
+                        preview_count = max(1, math.ceil(total_count * 0.05))
+                        df_preview = df_results.head(preview_count)
                     
-                    col1, col2, col3 = st.columns(3)
-                    col1.metric("Unique Interfering Satellites", total_count)
-                    col2.metric("Preview Records (Freemium)", preview_count)
-                    col3.metric("Analyzed Frequency Range", f"{target_f_min} - {target_f_max} MHz")
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Unique Interfering Satellites", total_count)
+                        col2.metric("Preview Records (Freemium)", preview_count)
+                        col3.metric("Analyzed Frequency Range", f"{target_f_min} - {target_f_max} MHz")
                     
-                    st.write(f"### 👁️ Free Preview ({preview_count} of {total_count} satellites)")
-                    st.dataframe(df_preview, use_container_width=True)
+                        st.write(f"### 👁️ Free Preview ({preview_count} of {total_count} satellites)")
+                        st.dataframe(df_preview, use_container_width=True)
                     
-                    st.divider()
-                    st.warning(f"🔒 **{total_count - preview_count} remaining satellites are hidden.**")
+                        st.divider()
+                        st.warning(f"🔒 **{total_count - preview_count} remaining satellites are hidden.**")
                     
-                    container_paywall = st.container(border=True)
-                    with container_paywall:
-                        st.markdown("### 👑 Upgrade to PRO to unlock full analysis")
-                        st.markdown(f"""
-                        Unlock the complete report to access:
-                        * 📈 **All {total_count} unique satellite networks** without restrictions.
-                        * 🔍 **Detailed beam-by-beam breakdown** with full EIRP and antenna pattern details.
-                        * 📥 **Direct Excel export (.xlsx)** with pre-formatted filters.
-                        * 🔔 **Automated email alerts** upon every new BR IFIC publication.
-                        """)
-                        st.button("💳 Purchase Full Report / Upgrade Pro", type="secondary", disabled=True)
-            except Exception as eval_err:
-                st.error(f"Failed to execute interference query: {eval_err}")
+                        container_paywall = st.container(border=True)
+                        with container_paywall:
+                            st.markdown("### 👑 Upgrade to PRO to unlock full analysis")
+                            st.markdown(f"""
+                            Unlock the complete report to access:
+                            * 📈 **All {total_count} unique satellite networks** without restrictions.
+                            * 🔍 **Detailed beam-by-beam breakdown** with full EIRP and antenna pattern details.
+                            * 📥 **Direct Excel export (.xlsx)** with pre-formatted filters.
+                            * 🔔 **Automated email alerts** upon every new BR IFIC publication.
+                            """)
+                            st.button("💳 Purchase Full Report / Upgrade Pro", type="secondary", disabled=True)
+                except Exception as eval_err:
+                    st.error(f"Failed to execute interference query: {eval_err}")
+
+# Router per il cambio pagina in fondo ad app.py
+if st.session_state.page == "signin":
+    render_sign_in_page()
+elif st.session_state.page == "signup":
+    render_sign_up_page()
+elif st.session_state.page == "reset":
+    render_reset_password_page()
