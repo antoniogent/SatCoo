@@ -3,22 +3,46 @@ import math
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine
-
+from stripe_manager import show_pricing_modal
 from supabase import create_client, Client
+import stripe 
+
+
+# Inserisci le chiavi API Stripe (se le stai usando)
+stripe.api_key = "sk_test_xxx" # Inserisci la tua Secret Key di Stripe
+
+PRICE_PAY_PER_VIEW = "price_xxx"  # €49 One-time
+PRICE_PRO_MONTHLY = "price_xxx"   # €199/mese
+PRICE_PLUS_MONTHLY = "price_xxx"  # €249/mese
+
+def create_checkout_session(price_id, mode, user_id, report_id=None):
+    try:
+        base_url = "http://localhost:8501"
+        session = stripe.checkout.Session.create(
+            line_items=[{"price": price_id, "quantity": 1}],
+            mode=mode,
+            success_url=f"{base_url}/?status=success&session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{base_url}/?status=cancel",
+            client_reference_id=str(user_id),
+            metadata={"user_id": str(user_id), "report_id": str(report_id) if report_id else "all"}
+        )
+        return session.url
+    except Exception as e:
+        st.error(f"Errore Checkout: {e}")
+        return None
+
+# 1. SET PAGE CONFIG DEVE ESSERE IN CIMA A TUTTO
+st.set_page_config(
+    page_title="SatCoo | Interference Analyzer",
+    page_icon="🛰️",
+    layout="wide"
+)
 
 SUPABASE_URL = "https://botdbymjqewmrixxqtmn.supabase.co"
 SUPABASE_KEY = "sb_publishable_9X5DeC5n92Nm1ib4bsLTYA_pwdiohEG"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# =========================================================================
-# PAGE CONFIGURATION
-# =========================================================================
-st.set_page_config(
-    page_title="SatCoo | Interference Analyzer",
-    page_icon="🛰️",
-    layout="wide"
-)
 
 # Inizializzazione variabili di sessione per il routing
 if "page" not in st.session_state:
@@ -217,12 +241,43 @@ target_f_max = None
 target_wic_no = None
 selected_sat = None
 
+# ==========================================
+# STEP 3: GESTIONE TARGET PLANO PRO PLUS
+# ==========================================
+# Recupera lo stato utente dalla sessione (default 'free')
+user_plan = st.session_state.get("user_plan", "free")
+
+if user_plan == "pro_plus":
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🔔  PRO PLUS plan")
+    st.sidebar.caption("Monitoring on future BR IFIC")
+    
+    # Recupera il satellite attualmente salvato dall'utente
+    current_target = st.session_state.get("monitored_sat", "")
+    
+    new_target = st.sidebar.text_input(
+        "Satellite Target (Max 1):", 
+        value=current_target,
+        placeholder="Es. USA-LUNARSAT-1",
+        help="Riceverai notifiche automatiche via email ad ogni nuova BR IFIC se ci sono interferenze su questo filing."
+    )
+    
+    if st.sidebar.button("💾 Savea Target", type="primary"):
+        if new_target.strip():
+            st.session_state["monitored_sat"] = new_target.strip()
+            # Qui si integrerà l'aggiornamento su PostgreSQL:
+            # update_user_monitored_sat(user_id=st.session_state.get("user_id"), sat_name=new_target.strip())
+            st.sidebar.success(f"Target onu: **{new_target.strip()}**")
+        else:
+            st.sidebar.warning("Insert a valid satellite nameo.")
+
+
 # =========================================================================
 # INPUT LOGIC
 # =========================================================================
 if "Yes" in is_published:
     st.sidebar.subheader("🔍 Search Filing")
-    sat_search_name = st.sidebar.text_input("Satellite name as reported in filing", value="USASAT-30G")
+    sat_search_name = st.sidebar.text_input("Satellite name as reported in filing", value="IRIDE")
     
     if sat_search_name:
         query_sat = """
@@ -287,7 +342,7 @@ if "Yes" in is_published:
                     bw_val = beam_info['bdwdth'] if pd.notnull(beam_info['bdwdth']) else "Not Available"
                     
                     st.sidebar.success(f"""
-                    **Target WIC (Latest API/A, CR/C, PART II-S):** {target_wic_no}  
+                    **Satellite Published in BR IFIC:** {target_wic_no}  
                     **Beam:** {selected_beam}  
                     **Antenna Gain:** {gain_val} dBi  
                     **Freq Min:** {target_f_min} MHz  
@@ -331,7 +386,7 @@ if st.button("🚀 Run Interference Screening", type="primary"):
             st.error("Invalid parameters or target satellite not selected.")
         else:
             if "Yes" in is_published:
-                wic_condition = "c.wic_no > %(wic_no)s AND c.sat_name != %(selected_sat)s"
+                wic_condition = "c.wic_no > %(wic_no)s AND c.sat_name != %(selected_sat)s AND c.ssn_ref = 'API/A'"
                 params_dict = {
                     'f_min': target_f_min,
                     'f_max': target_f_max,
@@ -349,16 +404,17 @@ if st.button("🚀 Run Interference Screening", type="primary"):
             query_interferers = f"""
             SELECT
                 c.sat_name,
-                MAX(c.adm) AS adm,
-                MAX(c.wic_no) AS wic_no,                     
-                ROUND(AVG(f.freq_mhz)::numeric, 2) AS freq_mhz,
-                MIN(f.freq_min) AS freq_min,
-                MAX(f.freq_max) AS freq_max,
-                MAX(f.bdwdth) AS max_bw_mhz,           
-                MAX(b.gain) AS max_gain_dbi,
-                MAX(g.eirp_nom) AS max_eirp_dbw,
-                MIN(o.min_perig_km) AS min_perig_km,
-                MAX(o.max_perig_km) AS max_perig_km
+                MAX(c.adm) AS "ADM",
+                MAX(c.wic_no) AS "BR IFIC",
+                MAX(c.ssn_ref) AS "Pub Type",                      
+                ROUND(AVG(f.freq_mhz)::numeric, 2) AS "Freq MHz",
+                MIN(f.freq_min) AS "Freq min",
+                MAX(f.freq_max) AS "Freq max",
+                MAX(f.bdwdth) AS "Max BW MHz",           
+                MAX(b.gain) AS "Max Gain dBi",
+                MAX(g.eirp_nom) AS "Max EIRP dBW",
+                MIN(o.min_perig_km) AS "min Perigee km",
+                MAX(o.max_perig_km) AS "Max Perigee km"
             FROM tbl_freq f
             JOIN tbl_grp g ON f.grp_id = g.grp_id
             JOIN tbl_com_el c ON g.ntc_id = c.ntc_id
@@ -377,7 +433,7 @@ if st.button("🚀 Run Interference Screening", type="primary"):
             ORDER BY MAX(c.wic_no) DESC;
             """
         
-            with st.spinner("Executing spatial and frequency overlap analysis..."):
+            with st.spinner("Executing frequency overlap analysis..."):
                 try:
                     df_results = pd.read_sql(query_interferers, con=engine, params=params_dict)
                     df_results = df_results.fillna("Not Available")
@@ -402,7 +458,8 @@ if st.button("🚀 Run Interference Screening", type="primary"):
                     
                         st.divider()
                         st.warning(f"🔒 **{total_count - preview_count} remaining satellites are hidden.**")
-                    
+
+                        # Contenitore Paywall con le schede dei prezzi SEMPRE VISIBILI
                         container_paywall = st.container(border=True)
                         with container_paywall:
                             st.markdown("### 👑 Upgrade to PRO to unlock full analysis")
@@ -410,14 +467,50 @@ if st.button("🚀 Run Interference Screening", type="primary"):
                             Unlock the complete report to access:
                             * 📈 **All {total_count} unique satellite networks** without restrictions.
                             * 🔍 **Detailed beam-by-beam breakdown** with full EIRP and antenna pattern details.
-                            * 📥 **Direct Excel export (.xlsx)** with pre-formatted filters.
+                            * 📊 **Direct Excel export (.xlsx)** with pre-formatted filters.
                             * 🔔 **Automated email alerts** upon every new BR IFIC publication.
                             """)
-                            st.button("💳 Purchase Full Report / Upgrade Pro", type="secondary", disabled=True)
+            
+                            st.divider()
+                            st.subheader("Select your plan to access full data:")
+            
+                            user_id = st.session_state.get("user_id", 1)
+                            current_report_id = f"ANALYSIS_{target_f_min}_{target_f_max}_MHz"
+            
+                            col1, col2, col3 = st.columns(3)
+
+                            with col1:
+                                st.markdown("#### Single Analysis")
+                                st.markdown("### €49")
+                                st.caption("One Time Payment")
+                                st.markdown("* Results Report \n* Export PDF/Excel")
+                                url = create_checkout_session(PRICE_PAY_PER_VIEW, "payment", user_id, current_report_id)
+                                if url:
+                                    st.link_button("👉 Pay €49", url, use_container_width=True, type="primary")
+
+                            with col2:
+                                st.markdown("#### PRO Monthly")
+                                st.markdown("### €199 /m")
+                                st.caption("Subscription")
+                                st.markdown("* No Limits Access\n* No Limits Exports")
+                                url = create_checkout_session(PRICE_PRO_MONTHLY, "subscription", user_id)
+                                if url:
+                                    st.link_button("👉 Subscribe for €199", url, use_container_width=True, type="primary")
+
+                            with col3:
+                                st.markdown("#### PRO PLUS")
+                                st.markdown("### €249 /m")
+                                st.caption("Subscription")
+                                st.markdown("* All included in PRO\n* **Alert BR IFIC on  Target Satellite**g")
+                                url = create_checkout_session(PRICE_PLUS_MONTHLY, "subscription", user_id)
+                                if url:
+                                    st.link_button("👉 Subscribe for €249", url, use_container_width=True, type="primary")
+
                 except Exception as eval_err:
                     st.error(f"Failed to execute interference query: {eval_err}")
 
 # Router per il cambio pagina in fondo ad app.py
+# Router con bypass attivo
 if st.session_state.page == "signin":
     render_sign_in_page()
 elif st.session_state.page == "signup":
