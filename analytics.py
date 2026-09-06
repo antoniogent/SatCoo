@@ -1,25 +1,24 @@
 # analytics.py
 import os
 import streamlit as st
-from posthog import Posthog
+from posthog import PostHog
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- 1. Inizializzazione Client PostHog ---
 POSTHOG_API_KEY = os.environ.get("POSTHOG_API_KEY")
 POSTHOG_HOST = os.environ.get("POSTHOG_HOST", "https://eu.posthog.com")
 
-posthog.debug = True # Per vedere i log nel terminale
-
-posthog_client = Posthog(
+# Istanza unica e corretta del client PostHog
+posthog_client = PostHog(
     project_api_key=POSTHOG_API_KEY,
-    host=POSTHOG_HOST
+    host=POSTHOG_HOST,
+    debug=True  # Sostituisce posthog.debug = True e mostra i log
 )
+
 
 # --- 2. Definizione delle Funzioni di Tracciamento ---
-posthog = Posthog(
-    project_api_key='IL_TUO_API_KEY',
-    host='https://eu.posthog.com',
-)
-
 def track_event(event_name, properties=None, user_id="anonymous", user_plan="free"):
     if properties is None:
         properties = {}
@@ -35,14 +34,15 @@ def track_event(event_name, properties=None, user_id="anonymous", user_plan="fre
     payload = {**properties, **user_properties}
     
     try:
-        posthog.capture(
+        posthog_client.capture(
             distinct_id=user_id,
             event=event_name,
             properties=payload
         )
-        posthog.flush()
+        posthog_client.flush()
     except Exception as e:
         print(f"Errore PostHog: {e}")
+
 
 def track_page_view(user_id, page_name, user_plan="free"):
     track_event(
@@ -52,6 +52,7 @@ def track_page_view(user_id, page_name, user_plan="free"):
         user_plan=user_plan
     )
 
+
 def track_search_executed(user_id, query_type, search_params, user_plan="free"):
     track_event(
         event_name="search_executed",
@@ -59,6 +60,7 @@ def track_search_executed(user_id, query_type, search_params, user_plan="free"):
         user_id=user_id,
         user_plan=user_plan
     )
+
 
 def track_pro_click(user_id, feature_gate, source_location, user_plan="free"):
     track_event(
@@ -68,14 +70,22 @@ def track_pro_click(user_id, feature_gate, source_location, user_plan="free"):
         user_plan=user_plan
     )
 
+
 def track_checkout_completed(user_id: str, plan_tier: str, amount: float, currency: str = "EUR"):
     """Da chiamare dopo la conferma di pagamento da Stripe."""
-    posthog_client.capture(
-        distinct_id=user_id,
-        event="checkout_completed",
-        properties={
-            "plan_tier": plan_tier,
-            "amount": amount,
-            "currency": currency
-        }
-    )
+    try:
+        posthog_client.capture(
+            distinct_id=user_id,
+            event="checkout_completed",
+            properties={
+                "plan_tier": plan_tier,
+                "amount": amount,
+                "currency": currency,
+                "$set": {
+                    "user_plan": plan_tier
+                }
+            }
+        )
+        posthog_client.flush()
+    except Exception as e:
+        print(f"Errore PostHog Checkout: {e}")
