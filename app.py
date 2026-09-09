@@ -580,6 +580,7 @@ if st.button("🚀 Run Interference Screening", type="primary"):
                 MAX(c.adm) AS "ADM",
                 MAX(c.wic_no) AS "BR IFIC",
                 MAX(c.ssn_ref) AS "Pub Type",                      
+                MAX(g.polar_type) AS "Pol Type",
                 ROUND(AVG(f.freq_mhz)::numeric, 2) AS "Freq MHz",
                 MIN(f.freq_min) AS "Freq min",
                 MAX(f.freq_max) AS "Freq max",
