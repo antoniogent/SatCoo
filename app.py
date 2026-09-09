@@ -1,5 +1,6 @@
 import os
 import math
+import time
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine
@@ -218,6 +219,10 @@ def render_sign_in_page():
                     # reload completo della pagina (es. ritorno da Stripe).
                     cookie_controller.set("sb_access_token", res.session.access_token)
                     cookie_controller.set("sb_refresh_token", res.session.refresh_token)
+                    # Piccola pausa: il componente ha bisogno di un istante per
+                    # eseguire davvero il comando JS che scrive il cookie nel
+                    # browser, prima che il rerun ricarichi la pagina.
+                    time.sleep(0.5)
                     st.session_state.page = "main" 
                     st.success("Successfully logged in!") 
                     st.rerun()

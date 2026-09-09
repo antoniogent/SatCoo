@@ -1,7 +1,7 @@
-FROM python:3.11-slim-bullseye
+FROM python:3.11-slim-bookworm
 
 # Installazione mdbtools + strumenti di compilazione
-RUN apt-get update -o Acquire::Check-Valid-Until=false && apt-get install -y \
+RUN apt-get update && apt-get install -y \
     mdbtools \
     gcc \
     g++ \

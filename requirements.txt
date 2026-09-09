@@ -7,3 +7,6 @@ requests
 supabase
 flask
 gunicorn
+stripe
+python-dotenv
+streamlet-cookies-controller
