@@ -5,7 +5,5 @@ streamlit
 openpyxl
 requests
 supabase
-fastapi
-univorn[standard]
 flask
 gunicorn
