@@ -149,6 +149,7 @@ def find_new_interferers(satellite_name: str, f_min: float, f_max: float, since_
        AND c.wic_no > %(since_wic)s
        AND c.wic_no <= %(up_to_wic)s
        AND c.sat_name != %(sat_name)s
+       AND c.ssn_ref = 'API/A'
     GROUP BY c.sat_name
     ORDER BY MAX(c.wic_no) DESC;
     """
