@@ -224,7 +224,15 @@ with st.sidebar:
     if st.session_state.get("user_authenticated", False):
         user_email = st.session_state.get("user_email", "Utente")
         st.success(f"👤 Signed In as: **{user_email}**")
-        
+
+        current_plan = st.session_state.get("user_plan", "free")
+        plan_labels = {"pro": "🎖️ Piano: PRO", "pro_plus": "🎖️ Piano: PRO PLUS"}
+        if current_plan in plan_labels:
+            st.caption(plan_labels[current_plan])
+        # Nota: chi ha solo comprato un Single Analysis (pay-per-view) non ha
+        # un "piano" persistente — resta 'free' lato profiles, quindi qui
+        # non compare nessun badge, come richiesto.
+
         if st.button("🚪 Sign Out", type="secondary"):
             st.session_state.user_authenticated = False
             st.session_state.user_email = None
@@ -418,21 +426,37 @@ if user_plan in PLAN_SATELLITE_LIMITS:
             st.rerun()
 
     if len(monitored) < max_satellites:
-        new_sat = st.sidebar.text_input(
-            "Aggiungi satellite da monitorare:",
-            placeholder="Es. USA-LUNARSAT-1",
-            key="new_monitored_sat_input",
+        monitor_search = st.sidebar.text_input(
+            "Cerca satellite da monitorare:",
+            placeholder="Es. IRIDE",
+            key="new_monitored_sat_search",
         )
-        if st.sidebar.button("💾 Aggiungi", type="primary"):
-            if new_sat.strip():
-                ok, msg = add_monitored_satellite(user_id_for_monitoring, new_sat.strip(), max_satellites)
-                if ok:
-                    st.sidebar.success(msg)
-                    st.rerun()
+        sat_to_add = None
+        if monitor_search:
+            try:
+                monitor_results = pd.read_sql(
+                    "SELECT DISTINCT sat_name FROM tbl_com_el WHERE sat_name ILIKE %(q)s ORDER BY sat_name;",
+                    con=engine,
+                    params={"q": f"%{monitor_search}%"},
+                )
+                if not monitor_results.empty:
+                    sat_to_add = st.sidebar.selectbox(
+                        "Seleziona il filing esatto:",
+                        monitor_results["sat_name"].tolist(),
+                        key="new_monitored_sat_select",
+                    )
                 else:
-                    st.sidebar.warning(msg)
+                    st.sidebar.warning("Nessun filing trovato con questo nome nel database.")
+            except Exception as monitor_err:
+                st.sidebar.error(f"Errore ricerca satellite: {monitor_err}")
+
+        if st.sidebar.button("💾 Aggiungi", type="primary", disabled=(sat_to_add is None)):
+            ok, msg = add_monitored_satellite(user_id_for_monitoring, sat_to_add, max_satellites)
+            if ok:
+                st.sidebar.success(msg)
+                st.rerun()
             else:
-                st.sidebar.warning("Inserisci un nome di satellite valido.")
+                st.sidebar.warning(msg)
     else:
         st.sidebar.info(f"Limite raggiunto ({max_satellites}/{max_satellites}). Rimuovi un satellite per aggiungerne un altro.")
 
