@@ -108,56 +108,6 @@ def has_purchased_report(user_id, report_id: str) -> bool:
         return False
 
 
-# Limite di satelliti monitorabili per piano (usato sia qui in app.py per la
-# UI, sia dallo script separato di invio email, che li legge dalla stessa
-# tabella senza bisogno di conoscere questo limite: qui serve solo per
-# impedire all'utente di aggiungerne più del dovuto).
-PLAN_SATELLITE_LIMITS = {"pro": 1, "pro_plus": 3}
-
-
-def get_monitored_satellites(user_id) -> list:
-    """Elenco dei satelliti monitorati dall'utente, in ordine di aggiunta."""
-    if not user_id:
-        return []
-    try:
-        res = (
-            supabase.table("monitored_satellites")
-            .select("satellite_name")
-            .eq("user_id", user_id)
-            .order("created_at")
-            .execute()
-        )
-        return [row["satellite_name"] for row in res.data]
-    except Exception:
-        return []
-
-
-def add_monitored_satellite(user_id, sat_name: str, max_allowed: int):
-    """Aggiunge un satellite alla lista monitorata, rispettando il limite del piano."""
-    current = get_monitored_satellites(user_id)
-    if sat_name in current:
-        return False, "Questo satellite è già nella tua lista."
-    if len(current) >= max_allowed:
-        return False, f"Hai raggiunto il limite di {max_allowed} satelliti per il tuo piano."
-    try:
-        supabase.table("monitored_satellites").insert(
-            {"user_id": user_id, "satellite_name": sat_name}
-        ).execute()
-        return True, f"'{sat_name}' aggiunto ai satelliti monitorati."
-    except Exception as e:
-        return False, f"Errore durante il salvataggio: {e}"
-
-
-def remove_monitored_satellite(user_id, sat_name: str) -> bool:
-    try:
-        supabase.table("monitored_satellites").delete().eq("user_id", user_id).eq(
-            "satellite_name", sat_name
-        ).execute()
-        return True
-    except Exception:
-        return False
-
-
 # Gestore dei cookie del browser: usato per far sopravvivere il login a un
 # reload completo della pagina (es. dopo il redirect di ritorno da Stripe
 # Checkout, che è un caricamento pagina nuovo agli occhi del browser, non
@@ -396,45 +346,34 @@ target_wic_no = None
 selected_sat = None
 
 # ==========================================
-# STEP 3: GESTIONE SATELLITI MONITORATI (PRO e PRO PLUS)
+# STEP 3: GESTIONE TARGET PLANO PRO PLUS
 # ==========================================
 # Recupera lo stato utente dalla sessione (default 'free')
 user_plan = st.session_state.get("user_plan", "free")
-user_id_for_monitoring = st.session_state.get("user_id")
 
-if user_plan in PLAN_SATELLITE_LIMITS:
-    max_satellites = PLAN_SATELLITE_LIMITS[user_plan]
-    monitored = get_monitored_satellites(user_id_for_monitoring)
-
+if user_plan == "pro_plus":
     st.sidebar.markdown("---")
-    st.sidebar.markdown(f"### 🔔 Satelliti monitorati ({len(monitored)}/{max_satellites})")
-    st.sidebar.caption("Riceverai un'email automatica ad ogni nuova pubblicazione BR IFIC se emergono interferenze su questi filing.")
-
-    for sat in monitored:
-        col_name, col_remove = st.sidebar.columns([4, 1])
-        col_name.markdown(f"🛰️ {sat}")
-        if col_remove.button("🗑️", key=f"remove_{sat}", help=f"Rimuovi {sat}"):
-            remove_monitored_satellite(user_id_for_monitoring, sat)
-            st.rerun()
-
-    if len(monitored) < max_satellites:
-        new_sat = st.sidebar.text_input(
-            "Aggiungi satellite da monitorare:",
-            placeholder="Es. USA-LUNARSAT-1",
-            key="new_monitored_sat_input",
-        )
-        if st.sidebar.button("💾 Aggiungi", type="primary"):
-            if new_sat.strip():
-                ok, msg = add_monitored_satellite(user_id_for_monitoring, new_sat.strip(), max_satellites)
-                if ok:
-                    st.sidebar.success(msg)
-                    st.rerun()
-                else:
-                    st.sidebar.warning(msg)
-            else:
-                st.sidebar.warning("Inserisci un nome di satellite valido.")
-    else:
-        st.sidebar.info(f"Limite raggiunto ({max_satellites}/{max_satellites}). Rimuovi un satellite per aggiungerne un altro.")
+    st.sidebar.markdown("### 🔔  PRO PLUS plan")
+    st.sidebar.caption("Monitoring on future BR IFIC")
+    
+    # Recupera il satellite attualmente salvato dall'utente
+    current_target = st.session_state.get("monitored_sat", "")
+    
+    new_target = st.sidebar.text_input(
+        "Satellite Target (Max 1):", 
+        value=current_target,
+        placeholder="Es. USA-LUNARSAT-1",
+        help="Riceverai notifiche automatiche via email ad ogni nuova BR IFIC se ci sono interferenze su questo filing."
+    )
+    
+    if st.sidebar.button("💾 Save Target", type="primary"):
+        if new_target.strip():
+            st.session_state["monitored_sat"] = new_target.strip()
+            # Qui si integrerà l'aggiornamento su PostgreSQL:
+            # update_user_monitored_sat(user_id=st.session_state.get("user_id"), sat_name=new_target.strip())
+            st.sidebar.success(f"Target saved: **{new_target.strip()}**")
+        else:
+            st.sidebar.warning("Insert a valid satellite name.")
 
 
 # =========================================================================
