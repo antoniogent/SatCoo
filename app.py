@@ -108,51 +108,51 @@ def has_purchased_report(user_id, report_id: str) -> bool:
         return False
 
 
-# Limite di satelliti monitorabili per piano (usato sia qui in app.py per la
-# UI, sia dallo script separato di invio email, che li legge dalla stessa
-# tabella senza bisogno di conoscere questo limite: qui serve solo per
-# impedire all'utente di aggiungerne più del dovuto).
-PLAN_SATELLITE_LIMITS = {"pro": 1, "pro_plus": 3}
+# Limite di beam monitorabili: solo PRO PLUS (i PRO non hanno gli alert
+# email, quindi salvare un beam senza notifiche non avrebbe scopo in questo
+# meccanismo). Usato sia qui per la UI, sia implicitamente dallo script di
+# invio email che legge la stessa tabella.
+PLAN_SATELLITE_LIMITS = {"pro_plus": 3}
 
 
-def get_monitored_satellites(user_id) -> list:
-    """Elenco dei satelliti monitorati dall'utente, in ordine di aggiunta."""
+def get_monitored_beams(user_id) -> list:
+    """Elenco dei beam monitorati dall'utente: [{'satellite_name':..., 'beam_name':...}, ...]."""
     if not user_id:
         return []
     try:
         res = (
             supabase.table("monitored_satellites")
-            .select("satellite_name")
+            .select("satellite_name, beam_name")
             .eq("user_id", user_id)
             .order("created_at")
             .execute()
         )
-        return [row["satellite_name"] for row in res.data]
+        return res.data
     except Exception:
         return []
 
 
-def add_monitored_satellite(user_id, sat_name: str, max_allowed: int):
-    """Aggiunge un satellite alla lista monitorata, rispettando il limite del piano."""
-    current = get_monitored_satellites(user_id)
-    if sat_name in current:
-        return False, "Questo satellite è già nella tua lista."
+def add_monitored_beam(user_id, satellite_name: str, beam_name: str, max_allowed: int):
+    """Aggiunge un beam alla lista monitorata, rispettando il limite del piano."""
+    current = get_monitored_beams(user_id)
+    if any(b["satellite_name"] == satellite_name and b["beam_name"] == beam_name for b in current):
+        return False, "Questo beam è già nella tua lista monitorata."
     if len(current) >= max_allowed:
-        return False, f"Hai raggiunto il limite di {max_allowed} satelliti per il tuo piano."
+        return False, f"Hai raggiunto il limite di {max_allowed} beam monitorati per il tuo piano."
     try:
         supabase.table("monitored_satellites").insert(
-            {"user_id": user_id, "satellite_name": sat_name}
+            {"user_id": user_id, "satellite_name": satellite_name, "beam_name": beam_name}
         ).execute()
-        return True, f"'{sat_name}' aggiunto ai satelliti monitorati."
+        return True, f"'{satellite_name}' (beam {beam_name}) aggiunto ai monitorati."
     except Exception as e:
         return False, f"Errore durante il salvataggio: {e}"
 
 
-def remove_monitored_satellite(user_id, sat_name: str) -> bool:
+def remove_monitored_beam(user_id, satellite_name: str, beam_name: str) -> bool:
     try:
         supabase.table("monitored_satellites").delete().eq("user_id", user_id).eq(
-            "satellite_name", sat_name
-        ).execute()
+            "satellite_name", satellite_name
+        ).eq("beam_name", beam_name).execute()
         return True
     except Exception:
         return False
@@ -404,61 +404,25 @@ target_wic_no = None
 selected_sat = None
 
 # ==========================================
-# STEP 3: GESTIONE SATELLITI MONITORATI (PRO e PRO PLUS)
+# STEP 3: SATELLITI/BEAM MONITORATI (solo PRO PLUS)
 # ==========================================
 # Recupera lo stato utente dalla sessione (default 'free')
 user_plan = st.session_state.get("user_plan", "free")
 user_id_for_monitoring = st.session_state.get("user_id")
+max_monitored_beams = PLAN_SATELLITE_LIMITS.get(user_plan, 0)
+monitored_beams = get_monitored_beams(user_id_for_monitoring) if max_monitored_beams else []
 
-if user_plan in PLAN_SATELLITE_LIMITS:
-    max_satellites = PLAN_SATELLITE_LIMITS[user_plan]
-    monitored = get_monitored_satellites(user_id_for_monitoring)
-
+if max_monitored_beams:
     st.sidebar.markdown("---")
-    st.sidebar.markdown(f"### 🔔 Satelliti monitorati ({len(monitored)}/{max_satellites})")
-    st.sidebar.caption("Riceverai un'email automatica ad ogni nuova pubblicazione BR IFIC se emergono interferenze su questi filing.")
+    st.sidebar.markdown(f"### 🔔 Beam monitorati ({len(monitored_beams)}/{max_monitored_beams})")
+    st.sidebar.caption("Riceverai un'email automatica ad ogni nuova pubblicazione BR IFIC se emergono interferenze su questi beam. Per aggiungerne uno, cercalo qui sotto come per uno screening normale.")
 
-    for sat in monitored:
+    for b in monitored_beams:
         col_name, col_remove = st.sidebar.columns([4, 1])
-        col_name.markdown(f"🛰️ {sat}")
-        if col_remove.button("🗑️", key=f"remove_{sat}", help=f"Rimuovi {sat}"):
-            remove_monitored_satellite(user_id_for_monitoring, sat)
+        col_name.markdown(f"🛰️ {b['satellite_name']} — {b['beam_name']}")
+        if col_remove.button("🗑️", key=f"remove_{b['satellite_name']}_{b['beam_name']}", help="Rimuovi"):
+            remove_monitored_beam(user_id_for_monitoring, b["satellite_name"], b["beam_name"])
             st.rerun()
-
-    if len(monitored) < max_satellites:
-        monitor_search = st.sidebar.text_input(
-            "Cerca satellite da monitorare:",
-            placeholder="Es. IRIDE",
-            key="new_monitored_sat_search",
-        )
-        sat_to_add = None
-        if monitor_search:
-            try:
-                monitor_results = pd.read_sql(
-                    "SELECT DISTINCT sat_name FROM tbl_com_el WHERE sat_name ILIKE %(q)s ORDER BY sat_name;",
-                    con=engine,
-                    params={"q": f"%{monitor_search}%"},
-                )
-                if not monitor_results.empty:
-                    sat_to_add = st.sidebar.selectbox(
-                        "Seleziona il filing esatto:",
-                        monitor_results["sat_name"].tolist(),
-                        key="new_monitored_sat_select",
-                    )
-                else:
-                    st.sidebar.warning("Nessun filing trovato con questo nome nel database.")
-            except Exception as monitor_err:
-                st.sidebar.error(f"Errore ricerca satellite: {monitor_err}")
-
-        if st.sidebar.button("💾 Aggiungi", type="primary", disabled=(sat_to_add is None)):
-            ok, msg = add_monitored_satellite(user_id_for_monitoring, sat_to_add, max_satellites)
-            if ok:
-                st.sidebar.success(msg)
-                st.rerun()
-            else:
-                st.sidebar.warning(msg)
-    else:
-        st.sidebar.info(f"Limite raggiunto ({max_satellites}/{max_satellites}). Rimuovi un satellite per aggiungerne un altro.")
 
 
 # =========================================================================
@@ -540,6 +504,26 @@ if "Yes" in is_published:
                     **Bandwidth:** {bw_val} MHz
                     """)
                     st.sidebar.info(f"👉 Screening starts from **WIC {target_wic_no + 1}** onwards (excluding WIC {target_wic_no}).")
+
+                    if max_monitored_beams:
+                        already_monitored = any(
+                            b["satellite_name"] == selected_sat and b["beam_name"] == selected_beam
+                            for b in monitored_beams
+                        )
+                        if already_monitored:
+                            st.sidebar.caption("🔔 Questo beam è già tra i monitorati.")
+                        elif len(monitored_beams) >= max_monitored_beams:
+                            st.sidebar.caption(f"Limite di {max_monitored_beams} beam monitorati raggiunto.")
+                        else:
+                            if st.sidebar.button("🔔 Aggiungi ai monitorati", key="add_to_monitored_btn"):
+                                ok, msg = add_monitored_beam(
+                                    user_id_for_monitoring, selected_sat, selected_beam, max_monitored_beams
+                                )
+                                if ok:
+                                    st.sidebar.success(msg)
+                                    st.rerun()
+                                else:
+                                    st.sidebar.warning(msg)
                 else:
                     st.sidebar.warning("No beams found for this satellite.")
             else:
