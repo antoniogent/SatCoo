@@ -1,15 +1,16 @@
-
-
 services:
   itu_postgres:
     image: postgres:15-alpine
     container_name: itu_postgres
     environment:
       POSTGRES_USER: itu_admin
-      POSTGRES_PASSWORD: supersecretpassword
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: itu_spectrum_db
     ports:
-      - "5432:5432"
+      # FIX SICUREZZA: prima era "5432:5432" (0.0.0.0), quindi raggiungibile
+      # da chiunque su internet. Ora solo dal server stesso; il container
+      # "app" ci arriva comunque via rete Docker interna (host "itu_postgres").
+      - "127.0.0.1:5432:5432"
     volumes:
       - itu_pgdata:/var/lib/postgresql/data
     restart: unless-stopped
@@ -21,12 +22,28 @@ services:
       - "8501:8501"
     volumes:
       - .:/app    # <--- Questo collega la tua cartella locale in tempo reale
-    environment:
-      - DATABASE_URL=postgresql://itu_admin:supersecretpassword@itu_postgres:5432/itu_spectrum_db
+    env_file:
+      - .env
     depends_on:
       - itu_postgres
     command: streamlit run app.py --server.address 0.0.0.0 --server.port 8501
     restart: unless-stopped
+
+  webhook:
+    build: .
+    container_name: itu_webhook
+    ports:
+      # Pubblicata sull'host così "stripe listen --forward-to localhost:8000/..."
+      # eseguito sul server OVH stesso riesce a raggiungere il container.
+      - "8000:8000"
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    command: gunicorn --bind 0.0.0.0:8000 --workers 2 stripe_webhook:app
+    restart: unless-stopped
+    # niente depends_on su itu_postgres: il webhook parla solo con
+    # Supabase e Stripe via internet, non con il Postgres degli ITU filing
 
 volumes:
   itu_pgdata:

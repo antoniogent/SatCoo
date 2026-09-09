@@ -5,26 +5,54 @@ import streamlit as st
 from sqlalchemy import create_engine
 from stripe_manager import show_pricing_modal
 from supabase import create_client, Client
-import stripe 
+import stripe
+from dotenv import load_dotenv
+
+# Carica le variabili da .env se presente (in produzione su OVH puoi anche
+# impostarle come vere variabili d'ambiente di sistema/systemd: in quel
+# caso load_dotenv() semplicemente non trova nulla da sovrascrivere).
+load_dotenv()
 
 
-# Inserisci le chiavi API Stripe (se le stai usando)
-stripe.api_key = "sk_test_xxx" # Inserisci la tua Secret Key di Stripe
+# =========================================================================
+# CONFIGURAZIONE DA VARIABILI D'AMBIENTE (mai chiavi hardcoded nel codice!)
+# =========================================================================
+# Sul server OVH, queste vengono lette dal tuo file .env (via systemd
+# EnvironmentFile= o python-dotenv). In locale, puoi creare un .env con
+# le stesse chiavi e caricarlo con `from dotenv import load_dotenv; load_dotenv()`
+# prima di questo blocco.
 
-PRICE_PAY_PER_VIEW = "price_xxx"  # €49 One-time
-PRICE_PRO_MONTHLY = "price_xxx"   # €199/mese
-PRICE_PLUS_MONTHLY = "price_xxx"  # €249/mese
+stripe.api_key = os.environ["STRIPE_SECRET_KEY"]  # NIENTE default: se manca, l'app deve fermarsi subito
 
-def create_checkout_session(price_id, mode, user_id, report_id=None):
+PRICE_PAY_PER_VIEW = os.environ["PRICE_PAY_PER_VIEW"]   # €49 One-time
+PRICE_PRO_MONTHLY = os.environ["PRICE_PRO_MONTHLY"]     # €199/mese
+PRICE_PLUS_MONTHLY = os.environ["PRICE_PLUS_MONTHLY"]   # €249/mese
+
+# Usato dal servizio webhook separato (non da questa app Streamlit) per
+# verificare che le richieste arrivino davvero da Stripe. Lo leggiamo
+# comunque qui per fallire subito e chiaramente se manca dal .env.
+STRIPE_WEBHOOK_SECRET = os.environ["STRIPE_WEBHOOK_SECRET"]
+
+# Dominio pubblico dell'app: in locale resta localhost, in produzione
+# imposta APP_BASE_URL=https://tuodominio.it nel .env
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8501")
+
+def create_checkout_session(price_id, mode, user_id, plan_name, report_id=None):
     try:
-        base_url = "http://localhost:8501"
+        base_url = APP_BASE_URL
         session = stripe.checkout.Session.create(
             line_items=[{"price": price_id, "quantity": 1}],
             mode=mode,
             success_url=f"{base_url}/?status=success&session_id={{CHECKOUT_SESSION_ID}}",
             cancel_url=f"{base_url}/?status=cancel",
             client_reference_id=str(user_id),
-            metadata={"user_id": str(user_id), "report_id": str(report_id) if report_id else "all"}
+            metadata={
+                "user_id": str(user_id),
+                "report_id": str(report_id) if report_id else "all",
+                # "single" = sblocca solo questo report (tabella purchases)
+                # "pro" / "pro_plus" = aggiorna l'abbonamento (tabella profiles)
+                "plan_name": plan_name,
+            }
         )
         return session.url
     except Exception as e:
@@ -38,10 +66,44 @@ st.set_page_config(
     layout="wide"
 )
 
-SUPABASE_URL = "https://botdbymjqewmrixxqtmn.supabase.co"
-SUPABASE_KEY = "sb_publishable_9X5DeC5n92Nm1ib4bsLTYA_pwdiohEG"
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]  # chiave admin: solo lato server, mai esposta al browser
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def get_user_plan(user_id: str) -> str:
+    """
+    Legge il piano dell'utente dalla tabella 'profiles' su Supabase.
+    Se la tabella non esiste ancora o l'utente non ha un profilo,
+    ricade in modo sicuro su 'free' (nessun accesso premium concesso di default).
+    NB: quando creiamo la tabella profiles, questa funzione andrà verificata
+    contro i nomi reali delle colonne.
+    """
+    try:
+        res = supabase.table("profiles").select("plan").eq("user_id", user_id).single().execute()
+        return res.data.get("plan", "free") if res.data else "free"
+    except Exception:
+        return "free"
+
+def has_purchased_report(user_id, report_id: str) -> bool:
+    """
+    True se l'utente ha già pagato €49 (Single Analysis) per QUESTO specifico
+    report (stessa combinazione target_f_min/target_f_max). Fallback sicuro
+    a False se manca la tabella purchases o user_id non è disponibile.
+    """
+    if not user_id:
+        return False
+    try:
+        res = (
+            supabase.table("purchases")
+            .select("id")
+            .eq("user_id", user_id)
+            .eq("report_id", report_id)
+            .execute()
+        )
+        return len(res.data) > 0
+    except Exception:
+        return False
 
 
 # Inizializzazione variabili di sessione per il routing
@@ -119,6 +181,8 @@ def render_sign_in_page():
                     res = supabase.auth.sign_in_with_password({"email": email, "password": password})
                     st.session_state.user_authenticated = True
                     st.session_state.user_email = res.user.email
+                    st.session_state.user_id = res.user.id  # FIX: prima non veniva mai salvato -> tutti i pagamenti finivano su user_id di default (1)
+                    st.session_state.user_plan = get_user_plan(res.user.id)
                     st.session_state.page = "main" 
                     st.success("Successfully logged in!") 
                     st.rerun()
@@ -188,7 +252,7 @@ def render_reset_password_page():
                     # Invia la mail di recupero da Supabase
                     supabase.auth.reset_password_email(
                         email,
-                        options={"redirect_to": "http://IP_DEL_TUO_SERVER:8501"}
+                        options={"redirect_to": APP_BASE_URL}
                     )
                     st.success("If the email is registered, a password reset link has been sent!")
                 except Exception as e:
@@ -204,10 +268,10 @@ def render_reset_password_page():
 # =========================================================================
 # DATABASE CONNECTION MANAGEMENT
 # =========================================================================
-DB_URL = os.getenv(
-    "DATABASE_URL", 
-    "postgresql://itu_admin:supersecretpassword@itu_postgres:5432/itu_spectrum_db"
-)
+# Nessun default con password hardcoded: se DATABASE_URL manca dal .env,
+# meglio che l'app si fermi con un errore chiaro piuttosto che rischiare
+# di usare credenziali in chiaro finite nel codice sorgente.
+DB_URL = os.environ["DATABASE_URL"]
 
 @st.cache_resource
 def get_db_engine():
@@ -262,14 +326,14 @@ if user_plan == "pro_plus":
         help="Riceverai notifiche automatiche via email ad ogni nuova BR IFIC se ci sono interferenze su questo filing."
     )
     
-    if st.sidebar.button("💾 Savea Target", type="primary"):
+    if st.sidebar.button("💾 Save Target", type="primary"):
         if new_target.strip():
             st.session_state["monitored_sat"] = new_target.strip()
             # Qui si integrerà l'aggiornamento su PostgreSQL:
             # update_user_monitored_sat(user_id=st.session_state.get("user_id"), sat_name=new_target.strip())
-            st.sidebar.success(f"Target onu: **{new_target.strip()}**")
+            st.sidebar.success(f"Target saved: **{new_target.strip()}**")
         else:
-            st.sidebar.warning("Insert a valid satellite nameo.")
+            st.sidebar.warning("Insert a valid satellite name.")
 
 
 # =========================================================================
@@ -445,17 +509,38 @@ if st.button("🚀 Run Interference Screening", type="primary"):
                     if total_count == 0:
                         st.success("🎉 No potential interferers found for the given parameters!")
                     else:
-                        preview_count = max(1, math.ceil(total_count * 0.05))
+                        # FIX: prima chi pagava non vedeva mai la tabella completa,
+                        # perché qui non si controllava mai il piano/acquisti dell'utente.
+                        user_plan = st.session_state.get("user_plan", "free")
+                        report_id_current = f"ANALYSIS_{target_f_min}_{target_f_max}_MHz"
+                        is_unlocked = (
+                            user_plan in ("pro", "pro_plus")
+                            or has_purchased_report(st.session_state.get("user_id"), report_id_current)
+                        )
+
+                        preview_count = total_count if is_unlocked else max(1, math.ceil(total_count * 0.05))
                         df_preview = df_results.head(preview_count)
                     
                         col1, col2, col3 = st.columns(3)
                         col1.metric("Unique Interfering Satellites", total_count)
-                        col2.metric("Preview Records (Freemium)", preview_count)
+                        col2.metric("Unlocked Records" if is_unlocked else "Preview Records (Freemium)", preview_count)
                         col3.metric("Analyzed Frequency Range", f"{target_f_min} - {target_f_max} MHz")
-                    
-                        st.write(f"### 👁️ Free Preview ({preview_count} of {total_count} satellites)")
+
+                        if is_unlocked:
+                            st.write(f"### ✅ Full Report ({total_count} satellites)")
+                        else:
+                            st.write(f"### 👁️ Free Preview ({preview_count} of {total_count} satellites)")
                         st.dataframe(df_preview, use_container_width=True)
-                    
+
+                        if is_unlocked:
+                            st.download_button(
+                                "⬇️ Export CSV",
+                                df_results.to_csv(index=False).encode("utf-8"),
+                                file_name=f"interference_report_{target_f_min}_{target_f_max}MHz.csv",
+                                mime="text/csv",
+                            )
+
+                    if total_count > 0 and not is_unlocked:
                         st.divider()
                         st.warning(f"🔒 **{total_count - preview_count} remaining satellites are hidden.**")
 
@@ -474,8 +559,12 @@ if st.button("🚀 Run Interference Screening", type="primary"):
                             st.divider()
                             st.subheader("Select your plan to access full data:")
             
-                            user_id = st.session_state.get("user_id", 1)
+                            user_id = st.session_state.get("user_id")
                             current_report_id = f"ANALYSIS_{target_f_min}_{target_f_max}_MHz"
+
+                            if not user_id:
+                                st.error("⚠️ Impossibile identificare l'utente per il checkout. Prova a rifare il login.")
+                                st.stop()
             
                             col1, col2, col3 = st.columns(3)
 
@@ -484,7 +573,7 @@ if st.button("🚀 Run Interference Screening", type="primary"):
                                 st.markdown("### €49")
                                 st.caption("One Time Payment")
                                 st.markdown("* Results Report \n* Export PDF/Excel")
-                                url = create_checkout_session(PRICE_PAY_PER_VIEW, "payment", user_id, current_report_id)
+                                url = create_checkout_session(PRICE_PAY_PER_VIEW, "payment", user_id, "single", current_report_id)
                                 if url:
                                     st.link_button("👉 Pay €49", url, use_container_width=True, type="primary")
 
@@ -493,7 +582,7 @@ if st.button("🚀 Run Interference Screening", type="primary"):
                                 st.markdown("### €199 /m")
                                 st.caption("Subscription")
                                 st.markdown("* No Limits Access\n* No Limits Exports")
-                                url = create_checkout_session(PRICE_PRO_MONTHLY, "subscription", user_id)
+                                url = create_checkout_session(PRICE_PRO_MONTHLY, "subscription", user_id, "pro")
                                 if url:
                                     st.link_button("👉 Subscribe for €199", url, use_container_width=True, type="primary")
 
@@ -501,8 +590,8 @@ if st.button("🚀 Run Interference Screening", type="primary"):
                                 st.markdown("#### PRO PLUS")
                                 st.markdown("### €249 /m")
                                 st.caption("Subscription")
-                                st.markdown("* All included in PRO\n* **Alert BR IFIC on  Target Satellite**g")
-                                url = create_checkout_session(PRICE_PLUS_MONTHLY, "subscription", user_id)
+                                st.markdown("* All included in PRO\n* **Alert BR IFIC on Target Satellite**")
+                                url = create_checkout_session(PRICE_PLUS_MONTHLY, "subscription", user_id, "pro_plus")
                                 if url:
                                     st.link_button("👉 Subscribe for €249", url, use_container_width=True, type="primary")
 
