@@ -7,6 +7,7 @@ from stripe_manager import show_pricing_modal
 from supabase import create_client, Client
 import stripe
 from dotenv import load_dotenv
+from streamlit_cookies_controller import CookieController
 
 # Carica le variabili da .env se presente (in produzione su OVH puoi anche
 # impostarle come vere variabili d'ambiente di sistema/systemd: in quel
@@ -106,6 +107,14 @@ def has_purchased_report(user_id, report_id: str) -> bool:
         return False
 
 
+# Gestore dei cookie del browser: usato per far sopravvivere il login a un
+# reload completo della pagina (es. dopo il redirect di ritorno da Stripe
+# Checkout, che è un caricamento pagina nuovo agli occhi del browser, non
+# un semplice "torna alla scheda" — senza questo, Streamlit perderebbe
+# session_state e l'utente risulterebbe disconnesso subito dopo aver pagato).
+cookie_controller = CookieController()
+
+
 # Inizializzazione variabili di sessione per il routing
 if "page" not in st.session_state:
     st.session_state.page = "main"
@@ -115,6 +124,26 @@ if "user_authenticated" not in st.session_state:
 
 if "user_email" not in st.session_state:
     st.session_state.user_email = None
+
+# Ripristino sessione da cookie: se questa è una pagina "nuova" agli occhi
+# di Streamlit (reload, o ritorno da Stripe Checkout) ma il browser ha
+# ancora un cookie di sessione valido, ripristiniamo il login automaticamente
+# invece di mostrare l'utente come disconnesso.
+if not st.session_state.user_authenticated:
+    _stored_access_token = cookie_controller.get("sb_access_token")
+    _stored_refresh_token = cookie_controller.get("sb_refresh_token")
+    if _stored_access_token and _stored_refresh_token:
+        try:
+            _restore_res = supabase.auth.set_session(_stored_access_token, _stored_refresh_token)
+            st.session_state.user_authenticated = True
+            st.session_state.user_email = _restore_res.user.email
+            st.session_state.user_id = _restore_res.user.id
+            st.session_state.user_plan = get_user_plan(_restore_res.user.id)
+        except Exception:
+            # Token scaduto o non più valido: puliamo i cookie, l'utente
+            # dovrà rifare il login normalmente.
+            cookie_controller.remove("sb_access_token")
+            cookie_controller.remove("sb_refresh_token")
 
 # =========================================================================
 # CUSTOM CSS
@@ -149,6 +178,8 @@ with st.sidebar:
             st.session_state.user_authenticated = False
             st.session_state.user_email = None
             st.session_state.page = "main"
+            cookie_controller.remove("sb_access_token")
+            cookie_controller.remove("sb_refresh_token")
             st.rerun()
     else:
         st.info("🔒 Status: Not Signed In")
@@ -183,6 +214,10 @@ def render_sign_in_page():
                     st.session_state.user_email = res.user.email
                     st.session_state.user_id = res.user.id  # FIX: prima non veniva mai salvato -> tutti i pagamenti finivano su user_id di default (1)
                     st.session_state.user_plan = get_user_plan(res.user.id)
+                    # Salva i token in un cookie così il login sopravvive a un
+                    # reload completo della pagina (es. ritorno da Stripe).
+                    cookie_controller.set("sb_access_token", res.session.access_token)
+                    cookie_controller.set("sb_refresh_token", res.session.refresh_token)
                     st.session_state.page = "main" 
                     st.success("Successfully logged in!") 
                     st.rerun()
