@@ -43,7 +43,11 @@ def stripe_webhook():
         return jsonify({"error": "Invalid signature or payload"}), 400
 
     event_type = event["type"]
-    data_object = event["data"]["object"]
+    # Le versioni recenti di stripe-python non supportano più .get() sugli
+    # oggetti restituiti dall'API (StripeObject) come se fossero dizionari:
+    # vanno convertiti esplicitamente con .to_dict() (conversione ricorsiva,
+    # copre anche i campi annidati) prima di poterci chiamare .get().
+    data_object = event["data"]["object"].to_dict()
 
     if event_type == "checkout.session.completed":
         handle_checkout_completed(data_object)
