@@ -165,31 +165,32 @@ def find_new_interferers(satellite_name: str, f_min: float, f_max: float, since_
     return df
 
 
-def send_alert_email(to_email: str, satellite_name: str, beam_name: str, interferers_df: pd.DataFrame, wic_no: int):
+def send_alert_email(to_email: str, satellite_name: str, beam_name: str, interferers_df: pd.DataFrame, since_wic: int, up_to_wic: int):
     count = len(interferers_df)
     target_label = f"{satellite_name} (beam {beam_name})"
+    range_label = f"BR IFIC {since_wic + 1}" if up_to_wic == since_wic + 1 else f"BR IFIC {since_wic + 1}–{up_to_wic}"
 
     if count == 0:
         body_html = f"""
         <p>Ciao,</p>
-        <p>Abbiamo controllato la pubblicazione BR IFIC <strong>{wic_no}</strong>
+        <p>Abbiamo controllato le pubblicazioni <strong>{range_label}</strong>
         per il beam che monitori, <strong>{target_label}</strong>:
         nessun nuovo potenziale interferente rilevato.</p>
         <p><a href="{APP_BASE_URL}">Accedi a SatCoo</a> per un'analisi completa in qualsiasi momento.</p>
         """
-        subject = f"✅ Nessun nuovo interferente per {target_label} (BR IFIC {wic_no})"
+        subject = f"✅ Nessun nuovo interferente per {target_label} ({range_label})"
     else:
         interferers_html = "".join(f"<li>{name}</li>" for name in interferers_df["sat_name"])
         body_html = f"""
         <p>Ciao,</p>
-        <p>La pubblicazione BR IFIC <strong>{wic_no}</strong> contiene {count}
+        <p>Le pubblicazioni <strong>{range_label}</strong> contengono {count}
         nuovo/i potenziale/i interferente/i per il beam che monitori,
         <strong>{target_label}</strong>:</p>
         <ul>{interferers_html}</ul>
         <p>Il dettaglio completo è nel CSV allegato a questa email.</p>
         <p><a href="{APP_BASE_URL}">Accedi a SatCoo</a> per l'analisi completa.</p>
         """
-        subject = f"⚠️ {count} nuovo/i interferente/i per {target_label} (BR IFIC {wic_no})"
+        subject = f"⚠️ {count} nuovo/i interferente/i per {target_label} ({range_label})"
 
     payload = {
         "from": ALERT_FROM_EMAIL,
@@ -201,7 +202,7 @@ def send_alert_email(to_email: str, satellite_name: str, beam_name: str, interfe
     if count > 0:
         csv_bytes = interferers_df.to_csv(index=False).encode("utf-8")
         payload["attachments"] = [{
-            "filename": f"interferenti_{satellite_name}_{beam_name}_WIC{wic_no}.csv",
+            "filename": f"interferenti_{satellite_name}_{beam_name}_WIC{since_wic + 1}-{up_to_wic}.csv",
             "content": base64.b64encode(csv_bytes).decode("ascii"),
         }]
 
@@ -239,7 +240,7 @@ def main():
 
         f_min, f_max = freq_range
         interferers_df = find_new_interferers(entry["satellite_name"], f_min, f_max, last_checked, latest_wic)
-        send_alert_email(entry["email"], entry["satellite_name"], entry["beam_name"], interferers_df, latest_wic)
+        send_alert_email(entry["email"], entry["satellite_name"], entry["beam_name"], interferers_df, last_checked, latest_wic)
 
         update_beam_checkpoint(entry["id"], latest_wic)
         logger.info(
