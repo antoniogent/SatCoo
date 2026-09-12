@@ -326,6 +326,19 @@ def render_sign_in_page():
                     st.session_state.user_email = res.user.email
                     st.session_state.user_id = res.user.id  # FIX: prima non veniva mai salvato -> tutti i pagamenti finivano su user_id di default (1)
                     st.session_state.user_plan = get_user_plan(res.user.id)
+                    # Collega l'id anonimo (usato per page_view prima del
+                    # login) al vero user_id: senza questo, PostHog vede due
+                    # "persone" diverse e i funnel restano vuoti.
+                    if POSTHOG_API_KEY:
+                        _anon_id = cookie_controller.get("ph_anon_id")
+                        st.session_state["_debug_anon_id_at_login"] = _anon_id  # solo per debug temporaneo
+                        if _anon_id:
+                            try:
+                                posthog.alias(previous_id=_anon_id, distinct_id=res.user.id)
+                            except Exception as e:
+                                print(f"[POSTHOG ALIAS ERROR] anon={_anon_id} user={res.user.id} errore={e}")
+                        else:
+                            print("[POSTHOG ALIAS SKIPPED] nessun ph_anon_id trovato nel cookie al momento del login")
                     track_event("user_signed_in")
                     # Salva i token in un cookie così il login sopravvive a un
                     # reload completo della pagina (es. ritorno da Stripe).
@@ -372,6 +385,13 @@ def render_sign_up_page():
             if email and password and password == confirm_password:
                 try:
                     res = supabase.auth.sign_up({"email": email, "password": password})
+                    if POSTHOG_API_KEY and res.user:
+                        _anon_id = cookie_controller.get("ph_anon_id")
+                        if _anon_id:
+                            try:
+                                posthog.alias(previous_id=_anon_id, distinct_id=res.user.id)
+                            except Exception:
+                                pass
                     track_event("user_signed_up")
                     st.success("Account created! Check your email to confirm your account.")
                 except Exception as e:
