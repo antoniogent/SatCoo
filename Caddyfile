@@ -1,0 +1,14 @@
+satcoo.cloud, www.satcoo.cloud {
+    # Il webhook Stripe ha priorità: tutto ciò che inizia con /stripe-webhook
+    # va al container webhook (Flask/gunicorn).
+    handle /stripe-webhook* {
+        reverse_proxy webhook:8000
+    }
+
+    # Tutto il resto (l'app vera e propria) va a Streamlit.
+    # Caddy gestisce automaticamente l'upgrade a WebSocket richiesto da
+    # Streamlit per la comunicazione in tempo reale col browser.
+    handle {
+        reverse_proxy app:8501
+    }
+}

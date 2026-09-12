@@ -19,7 +19,11 @@ services:
     build: .
     container_name: itu_app
     ports:
-      - "8501:8501"
+      # FIX SICUREZZA: prima era "8501:8501" (0.0.0.0), raggiungibile
+      # direttamente da tutto internet in HTTP semplice. Ora solo Caddy
+      # (che gira nello stesso Docker network) ci parla; 127.0.0.1 resta
+      # comodo per debug diretto dal server stesso, se mai serve.
+      - "127.0.0.1:8501:8501"
     volumes:
       - .:/app    # <--- Questo collega la tua cartella locale in tempo reale
     env_file:
@@ -33,9 +37,10 @@ services:
     build: .
     container_name: itu_webhook
     ports:
-      # Pubblicata sull'host così "stripe listen --forward-to localhost:8000/..."
-      # eseguito sul server OVH stesso riesce a raggiungere il container.
-      - "8000:8000"
+      # FIX SICUREZZA: prima era "8000:8000" (0.0.0.0). Ora solo Caddy ci
+      # parla dall'esterno; 127.0.0.1 resta utile per "stripe listen
+      # --forward-to localhost:8000/..." durante test futuri in locale.
+      - "127.0.0.1:8000:8000"
     volumes:
       - .:/app
     env_file:
@@ -45,5 +50,22 @@ services:
     # niente depends_on su itu_postgres: il webhook parla solo con
     # Supabase e Stripe via internet, non con il Postgres degli ITU filing
 
+  caddy:
+    image: caddy:2-alpine
+    container_name: itu_caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+      - webhook
+    restart: unless-stopped
+
 volumes:
   itu_pgdata:
+  caddy_data:
+  caddy_config:
