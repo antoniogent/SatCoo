@@ -289,9 +289,15 @@ with st.sidebar:
         if st.button("🚪 Sign Out", type="secondary"):
             st.session_state.user_authenticated = False
             st.session_state.user_email = None
+            st.session_state.user_id = None
+            st.session_state.user_plan = "free"
             st.session_state.page = "main"
             cookie_controller.remove("sb_access_token")
             cookie_controller.remove("sb_refresh_token")
+            # Stessa pausa usata al login: il componente ha bisogno di un
+            # istante per eseguire davvero la cancellazione nel browser
+            # prima che il rerun ricarichi la pagina.
+            time.sleep(0.5)
             st.rerun()
     else:
         st.info("🔒 Status: Not Signed In")
