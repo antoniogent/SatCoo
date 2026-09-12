@@ -132,8 +132,13 @@ def get_monitored_beams(user_id) -> list:
         return []
 
 
-def add_monitored_beam(user_id, satellite_name: str, beam_name: str, max_allowed: int):
-    """Aggiunge un beam alla lista monitorata, rispettando il limite del piano."""
+def add_monitored_beam(user_id, satellite_name: str, beam_name: str, max_allowed: int, initial_wic: int):
+    """
+    Aggiunge un beam alla lista monitorata, rispettando il limite del piano.
+    initial_wic è il WIC di pubblicazione del satellite al momento
+    dell'aggiunta: da lì partirà la ricerca per il PRIMO alert email
+    (non da un checkpoint globale condiviso con altri beam).
+    """
     current = get_monitored_beams(user_id)
     if any(b["satellite_name"] == satellite_name and b["beam_name"] == beam_name for b in current):
         return False, "Questo beam è già nella tua lista monitorata."
@@ -141,7 +146,12 @@ def add_monitored_beam(user_id, satellite_name: str, beam_name: str, max_allowed
         return False, f"Hai raggiunto il limite di {max_allowed} beam monitorati per il tuo piano."
     try:
         supabase.table("monitored_satellites").insert(
-            {"user_id": user_id, "satellite_name": satellite_name, "beam_name": beam_name}
+            {
+                "user_id": user_id,
+                "satellite_name": satellite_name,
+                "beam_name": beam_name,
+                "last_checked_wic": initial_wic,
+            }
         ).execute()
         return True, f"'{satellite_name}' (beam {beam_name}) aggiunto ai monitorati."
     except Exception as e:
@@ -517,7 +527,7 @@ if "Yes" in is_published:
                         else:
                             if st.sidebar.button("🔔 Aggiungi ai monitorati", key="add_to_monitored_btn"):
                                 ok, msg = add_monitored_beam(
-                                    user_id_for_monitoring, selected_sat, selected_beam, max_monitored_beams
+                                    user_id_for_monitoring, selected_sat, selected_beam, max_monitored_beams, target_wic_no
                                 )
                                 if ok:
                                     st.sidebar.success(msg)

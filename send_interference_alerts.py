@@ -10,16 +10,18 @@ funziona.
 
 Cosa fa, in ordine:
 1. Legge il numero di pubblicazione (WIC) più recente nel database ITU.
-2. Lo confronta con l'ultimo WIC per cui abbiamo già mandato alert
-   (checkpoint salvato su Supabase, tabella alert_state).
-3. Se non ci sono pubblicazioni nuove rispetto all'ultima volta, esce
-   senza fare nulla (nessuna email duplicata).
-4. Se ci sono, per ogni satellite monitorato da un utente PRO PLUS (solo
-   PRO PLUS: i PRO possono salvare un satellite ma non ricevono email),
-   cerca interferenti SOLO nelle pubblicazioni nuove — non rifà lo
-   screening su tutto lo storico — e se ne trova, manda un'email con
-   l'elenco tramite Resend.
-5. Aggiorna il checkpoint su Supabase.
+2. Per OGNI beam monitorato (colonna 'last_checked_wic' nella tabella
+   monitored_satellites), confronta il proprio checkpoint individuale con
+   quello più recente. Ogni beam ha il proprio checkpoint indipendente,
+   non uno globale condiviso: quando aggiungi un beam da monitorare,
+   parte da quel momento (dal WIC di pubblicazione del satellite stesso),
+   non da quando hai aggiunto un ALTRO beam mesi prima.
+3. Se per quel beam non ci sono pubblicazioni nuove, lo salta (nessuna
+   email duplicata).
+4. Se ci sono, cerca interferenti SOLO nell'intervallo nuovo (non rifà lo
+   screening su tutto lo storico) e manda un'email con l'elenco tramite
+   Resend — anche quando non trova nulla, per conferma.
+5. Aggiorna il checkpoint DI QUEL SOLO beam.
 
 Uso:
     python send_interference_alerts.py
@@ -67,36 +69,38 @@ def get_latest_wic() -> int:
     return int(df["max_wic"].iloc[0])
 
 
-def get_last_alerted_wic() -> int:
-    res = supabase.table("alert_state").select("last_alerted_wic").eq("id", 1).single().execute()
-    return res.data["last_alerted_wic"] if res.data else 0
-
-
-def set_last_alerted_wic(wic: int):
-    supabase.table("alert_state").update({"last_alerted_wic": wic}).eq("id", 1).execute()
-
-
 def get_pro_plus_monitored_satellites():
     """
-    Ritorna [{user_id, email, satellite_name, beam_name}, ...] SOLO per gli
-    utenti con piano pro_plus (i soli con diritto agli alert email).
+    Ritorna [{id, user_id, email, satellite_name, beam_name, last_checked_wic}, ...]
+    SOLO per gli utenti con piano pro_plus. 'id' e 'last_checked_wic' servono
+    per aggiornare il checkpoint DI QUEL SINGOLO beam dopo averlo controllato
+    (ogni beam ha il proprio, non uno globale condiviso).
     """
     profiles_res = supabase.table("profiles").select("user_id, email, plan").eq("plan", "pro_plus").execute()
     pro_plus_emails = {row["user_id"]: row["email"] for row in profiles_res.data}
     if not pro_plus_emails:
         return []
 
-    sats_res = supabase.table("monitored_satellites").select("user_id, satellite_name, beam_name").execute()
+    sats_res = supabase.table("monitored_satellites").select(
+        "id, user_id, satellite_name, beam_name, last_checked_wic"
+    ).execute()
     return [
         {
+            "id": row["id"],
             "user_id": row["user_id"],
             "email": pro_plus_emails[row["user_id"]],
             "satellite_name": row["satellite_name"],
             "beam_name": row["beam_name"],
+            "last_checked_wic": row["last_checked_wic"],
         }
         for row in sats_res.data
         if row["user_id"] in pro_plus_emails
     ]
+
+
+def update_beam_checkpoint(row_id: str, wic: int):
+    """Aggiorna il checkpoint SOLO di questo beam (non tocca gli altri)."""
+    supabase.table("monitored_satellites").update({"last_checked_wic": wic}).eq("id", row_id).execute()
 
 
 def get_beam_frequency_range(satellite_name: str, beam_name: str):
@@ -215,28 +219,33 @@ def send_alert_email(to_email: str, satellite_name: str, beam_name: str, interfe
 
 def main():
     latest_wic = get_latest_wic()
-    last_alerted = get_last_alerted_wic()
-
-    if latest_wic <= last_alerted:
-        logger.info(f"Nessuna nuova pubblicazione (ultimo WIC noto: {latest_wic}). Niente da fare.")
-        return
-
-    logger.info(f"Nuove pubblicazioni trovate: da WIC {last_alerted + 1} a {latest_wic}.")
-
     monitored = get_pro_plus_monitored_satellites()
-    logger.info(f"{len(monitored)} satelliti monitorati da utenti PRO PLUS.")
+    logger.info(f"{len(monitored)} beam monitorati da utenti PRO PLUS. Ultima pubblicazione nel DB: WIC {latest_wic}.")
 
     for entry in monitored:
+        last_checked = entry["last_checked_wic"]
+
+        if latest_wic <= last_checked:
+            logger.info(
+                f"Nessuna novità per {entry['satellite_name']} / {entry['beam_name']} "
+                f"(già controllato fino a WIC {last_checked})."
+            )
+            continue
+
         freq_range = get_beam_frequency_range(entry["satellite_name"], entry["beam_name"])
         if freq_range is None:
             logger.warning(f"Beam non trovato nel DB: {entry['satellite_name']} / {entry['beam_name']}")
             continue
+
         f_min, f_max = freq_range
-        interferers_df = find_new_interferers(entry["satellite_name"], f_min, f_max, last_alerted, latest_wic)
+        interferers_df = find_new_interferers(entry["satellite_name"], f_min, f_max, last_checked, latest_wic)
         send_alert_email(entry["email"], entry["satellite_name"], entry["beam_name"], interferers_df, latest_wic)
 
-    set_last_alerted_wic(latest_wic)
-    logger.info(f"Checkpoint aggiornato a WIC {latest_wic}.")
+        update_beam_checkpoint(entry["id"], latest_wic)
+        logger.info(
+            f"Checkpoint di {entry['satellite_name']} / {entry['beam_name']} "
+            f"aggiornato a WIC {latest_wic} (era {last_checked})."
+        )
 
 
 if __name__ == "__main__":
