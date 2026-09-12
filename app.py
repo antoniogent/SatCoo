@@ -1,12 +1,15 @@
 import os
 import math
 import time
+import uuid
+from urllib.parse import quote
 import pandas as pd
 import streamlit as st
 from sqlalchemy import create_engine
 from stripe_manager import show_pricing_modal
 from supabase import create_client, Client
 import stripe
+import posthog
 from dotenv import load_dotenv
 from streamlit_cookies_controller import CookieController
 
@@ -39,13 +42,18 @@ STRIPE_WEBHOOK_SECRET = os.environ["STRIPE_WEBHOOK_SECRET"]
 # imposta APP_BASE_URL=https://tuodominio.it nel .env
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8501")
 
-def create_checkout_session(price_id, mode, user_id, plan_name, report_id=None):
+def create_checkout_session(price_id, mode, user_id, plan_name, report_id=None, sat_name=None, beam_name=None):
     try:
         base_url = APP_BASE_URL
+        success_url = f"{base_url}/?status=success&session_id={{CHECKOUT_SESSION_ID}}"
+        if sat_name:
+            success_url += f"&sat={quote(sat_name)}"
+        if beam_name:
+            success_url += f"&beam={quote(beam_name)}"
         session = stripe.checkout.Session.create(
             line_items=[{"price": price_id, "quantity": 1}],
             mode=mode,
-            success_url=f"{base_url}/?status=success&session_id={{CHECKOUT_SESSION_ID}}",
+            success_url=success_url,
             cancel_url=f"{base_url}/?status=cancel",
             client_reference_id=str(user_id),
             metadata={
@@ -175,6 +183,41 @@ def remove_monitored_beam(user_id, satellite_name: str, beam_name: str) -> bool:
 # session_state e l'utente risulterebbe disconnesso subito dopo aver pagato).
 cookie_controller = CookieController()
 
+# --- PostHog: analytics prodotto (visite, ricerche, pagamenti) ---
+POSTHOG_API_KEY = os.environ.get("POSTHOG_API_KEY")
+POSTHOG_HOST = os.environ.get("POSTHOG_HOST", "https://eu.posthog.com")
+if POSTHOG_API_KEY:
+    posthog.api_key = POSTHOG_API_KEY
+    posthog.host = POSTHOG_HOST
+
+
+def get_distinct_id() -> str:
+    """
+    Un identificativo stabile per collegare gli eventi alla stessa persona
+    nel tempo. Se loggato, usa lo user_id vero (così colleghiamo le
+    ricerche fatte da anonimo PRIMA del login, una volta che si registra,
+    a patto che siano nella stessa sessione browser). Se non loggato, usa
+    un id anonimo salvato in cookie, che sopravvive ai reload di pagina.
+    """
+    user_id = st.session_state.get("user_id")
+    if user_id:
+        return str(user_id)
+    anon_id = cookie_controller.get("ph_anon_id")
+    if not anon_id:
+        anon_id = str(uuid.uuid4())
+        cookie_controller.set("ph_anon_id", anon_id)
+    return anon_id
+
+
+def track_event(event_name: str, properties: dict = None):
+    """Non fa nulla se POSTHOG_API_KEY non è configurata (fail-safe)."""
+    if not POSTHOG_API_KEY:
+        return
+    try:
+        posthog.capture(distinct_id=get_distinct_id(), event=event_name, properties=properties or {})
+    except Exception:
+        pass  # il tracciamento non deve mai far fallire l'app
+
 
 # Inizializzazione variabili di sessione per il routing
 if "page" not in st.session_state:
@@ -283,6 +326,7 @@ def render_sign_in_page():
                     st.session_state.user_email = res.user.email
                     st.session_state.user_id = res.user.id  # FIX: prima non veniva mai salvato -> tutti i pagamenti finivano su user_id di default (1)
                     st.session_state.user_plan = get_user_plan(res.user.id)
+                    track_event("user_signed_in")
                     # Salva i token in un cookie così il login sopravvive a un
                     # reload completo della pagina (es. ritorno da Stripe).
                     cookie_controller.set("sb_access_token", res.session.access_token)
@@ -328,6 +372,7 @@ def render_sign_up_page():
             if email and password and password == confirm_password:
                 try:
                     res = supabase.auth.sign_up({"email": email, "password": password})
+                    track_event("user_signed_up")
                     st.success("Account created! Check your email to confirm your account.")
                 except Exception as e:
                     st.error(f"Registration failed: {e}")
@@ -401,7 +446,27 @@ except Exception as e:
 st.title("🛰️ SatCoo | Interference Analyzer")
 st.caption("Spectrum Interference Screening for Satellite Coordination (based on ITU BR IFIC filings)")
 
+if not st.session_state.get("_page_view_tracked", False):
+    track_event("page_view")
+    st.session_state["_page_view_tracked"] = True
+
 st.sidebar.header("⚙️ Target Satellite Configuration")
+
+# Ripristino della ricerca dopo il ritorno da Stripe Checkout: il redirect
+# è un caricamento pagina completo agli occhi del browser, quindi senza
+# questo l'utente dovrebbe rifare da capo ricerca satellite + selezione
+# beam subito dopo aver pagato. I valori arrivano come query string
+# nell'URL di ritorno (impostati in create_checkout_session).
+_qp = st.query_params
+if _qp.get("status") == "success" and not st.session_state.get("_restored_search_after_payment", False):
+    if _qp.get("sat"):
+        st.session_state["sat_search_name_widget"] = _qp.get("sat")
+        st.session_state["selected_sat_widget"] = _qp.get("sat")
+    if _qp.get("beam"):
+        st.session_state["selected_beam_widget"] = _qp.get("beam")
+    # Evita di riapplicare questi valori ad ogni rerun successivo, così
+    # l'utente può comunque cercare liberamente qualcos'altro dopo.
+    st.session_state["_restored_search_after_payment"] = True
 
 is_published = st.sidebar.radio(
     "Has your satellite filing already been published?",
@@ -412,6 +477,7 @@ target_f_min = None
 target_f_max = None
 target_wic_no = None
 selected_sat = None
+selected_beam = None
 
 # ==========================================
 # STEP 3: SATELLITI/BEAM MONITORATI (solo PRO PLUS)
@@ -440,7 +506,7 @@ if max_monitored_beams:
 # =========================================================================
 if "Yes" in is_published:
     st.sidebar.subheader("🔍 Search Filing")
-    sat_search_name = st.sidebar.text_input("Satellite name as reported in filing", value="IRIDE")
+    sat_search_name = st.sidebar.text_input("Satellite name as reported in filing", value="IRIDE", key="sat_search_name_widget")
     
     if sat_search_name:
         query_sat = """
@@ -452,7 +518,7 @@ if "Yes" in is_published:
             sat_results = pd.read_sql(query_sat, con=engine, params={'sat_name': f"%{sat_search_name}%"})
             
             if not sat_results.empty:
-                selected_sat = st.sidebar.selectbox("Select Found Notice", sat_results['sat_name'].tolist())
+                selected_sat = st.sidebar.selectbox("Select Found Notice", sat_results['sat_name'].tolist(), key="selected_sat_widget")
                 
                 query_beams = """
                 SELECT DISTINCT g.beam_name
@@ -464,7 +530,7 @@ if "Yes" in is_published:
                 beam_results = pd.read_sql(query_beams, con=engine, params={'sat_name': selected_sat})
                 
                 if not beam_results.empty:
-                    selected_beam = st.sidebar.selectbox("Select Beam", beam_results['beam_name'].tolist())
+                    selected_beam = st.sidebar.selectbox("Select Beam", beam_results['beam_name'].tolist(), key="selected_beam_widget")
                     
                     query_beam_details = """
                     SELECT 
@@ -623,6 +689,11 @@ if st.button("🚀 Run Interference Screening", type="primary"):
                     df_results = df_results.fillna("Not Available")
                 
                     total_count = len(df_results)
+                    track_event("search_performed", {
+                        "satellite": selected_sat,
+                        "beam": selected_beam,
+                        "results_count": total_count,
+                    })
                 
                     st.subheader("📊 Analysis Results")
                 
@@ -693,7 +764,8 @@ if st.button("🚀 Run Interference Screening", type="primary"):
                                 st.markdown("### €49")
                                 st.caption("One Time Payment")
                                 st.markdown("* Results Report \n* Export PDF/Excel")
-                                url = create_checkout_session(PRICE_PAY_PER_VIEW, "payment", user_id, "single", current_report_id)
+                                track_event("checkout_started", {"plan": "single"})
+                                url = create_checkout_session(PRICE_PAY_PER_VIEW, "payment", user_id, "single", current_report_id, selected_sat, selected_beam)
                                 if url:
                                     st.link_button("👉 Pay €49", url, use_container_width=True, type="primary")
 
@@ -702,7 +774,8 @@ if st.button("🚀 Run Interference Screening", type="primary"):
                                 st.markdown("### €199 /m")
                                 st.caption("Subscription")
                                 st.markdown("* No Limits Access\n* No Limits Exports")
-                                url = create_checkout_session(PRICE_PRO_MONTHLY, "subscription", user_id, "pro")
+                                track_event("checkout_started", {"plan": "pro"})
+                                url = create_checkout_session(PRICE_PRO_MONTHLY, "subscription", user_id, "pro", sat_name=selected_sat, beam_name=selected_beam)
                                 if url:
                                     st.link_button("👉 Subscribe for €199", url, use_container_width=True, type="primary")
 
@@ -711,7 +784,8 @@ if st.button("🚀 Run Interference Screening", type="primary"):
                                 st.markdown("### €249 /m")
                                 st.caption("Subscription")
                                 st.markdown("* All included in PRO\n* **Alert BR IFIC on Target Satellite**")
-                                url = create_checkout_session(PRICE_PLUS_MONTHLY, "subscription", user_id, "pro_plus")
+                                track_event("checkout_started", {"plan": "pro_plus"})
+                                url = create_checkout_session(PRICE_PLUS_MONTHLY, "subscription", user_id, "pro_plus", sat_name=selected_sat, beam_name=selected_beam)
                                 if url:
                                     st.link_button("👉 Subscribe for €249", url, use_container_width=True, type="primary")
 

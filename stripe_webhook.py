@@ -3,17 +3,30 @@ import logging
 import stripe
 from flask import Flask, request, jsonify
 from supabase import create_client, Client
+from posthog import Posthog
 from dotenv import load_dotenv
 
-# --- PostHog: disattivato per ora, riattivabile in futuro senza riscrivere
-# la logica sotto. Basta scommentare le 3 righe di import/init qui sotto e
-# le chiamate posthog.capture(...) più in basso, e aggiungere POSTHOG_API_KEY
-# al .env.
-# from posthog import Posthog
-# posthog = Posthog(project_api_key=os.environ.get("POSTHOG_API_KEY"),
-#                    host=os.environ.get("POSTHOG_HOST", "https://eu.posthog.com"))
-
 load_dotenv()
+
+# --- PostHog: analytics prodotto. Se POSTHOG_API_KEY non è configurata,
+# posthog_client resta None e track_event() diventa un no-op (l'app non si
+# rompe, semplicemente non traccia nulla).
+POSTHOG_API_KEY = os.environ.get("POSTHOG_API_KEY")
+posthog_client = None
+if POSTHOG_API_KEY:
+    posthog_client = Posthog(
+        project_api_key=POSTHOG_API_KEY,
+        host=os.environ.get("POSTHOG_HOST", "https://eu.posthog.com"),
+    )
+
+
+def track_event(distinct_id: str, event_name: str, properties: dict = None):
+    if not posthog_client or not distinct_id:
+        return
+    try:
+        posthog_client.capture(distinct_id=distinct_id, event=event_name, properties=properties or {})
+    except Exception:
+        pass  # il tracciamento non deve mai far fallire l'elaborazione del webhook
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("satcoo-webhook")
@@ -76,6 +89,9 @@ def handle_checkout_completed(session: dict):
         logger.error(f"checkout.session.completed senza user_id/plan_name nei metadata: {checkout_session_id}")
         return
 
+    amount_total = (session.get("amount_total") or 0) / 100.0
+    currency = session.get("currency", "eur")
+
     if plan_name == "single":
         # Pagamento one-time: sblocca SOLO questo report, non tocca profiles.plan
         try:
@@ -102,26 +118,28 @@ def handle_checkout_completed(session: dict):
     else:
         logger.warning(f"plan_name sconosciuto nei metadata: {plan_name}")
 
-    # posthog.capture(distinct_id=user_id, event="checkout_completed", properties={
-    #     "amount": session.get("amount_total", 0) / 100.0,
-    #     "currency": session.get("currency", "eur"),
-    #     "plan_name": plan_name,
-    # })
-    # posthog.flush()
+    track_event(user_id, "checkout_completed", {
+        "amount": amount_total,
+        "currency": currency,
+        "plan_name": plan_name,
+    })
 
 
 def handle_subscription_deleted(subscription: dict):
     """L'abbonamento è stato cancellato: l'utente torna a 'free'."""
     subscription_id = subscription.get("id")
+    user_id = None
     try:
-        supabase.table("profiles").update({"plan": "free"}).eq(
+        result = supabase.table("profiles").update({"plan": "free"}).eq(
             "stripe_subscription_id", subscription_id
         ).execute()
+        if result.data:
+            user_id = result.data[0].get("user_id")
         logger.info(f"Abbonamento {subscription_id} terminato -> piano riportato a free")
     except Exception as e:
         logger.error(f"Errore downgrade a free: {e}")
 
-    # posthog.capture(distinct_id=..., event="subscription_cancelled", ...)
+    track_event(user_id, "subscription_cancelled", {"stripe_subscription_id": subscription_id})
 
 
 def handle_subscription_updated(subscription: dict):

@@ -10,3 +10,4 @@ gunicorn
 stripe
 python-dotenv
 streamlit-cookies-controller
+posthog 
