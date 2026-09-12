@@ -335,10 +335,11 @@ def render_sign_in_page():
                         if _anon_id:
                             try:
                                 posthog.alias(previous_id=_anon_id, distinct_id=res.user.id)
+                                print(f"[POSTHOG ALIAS OK] anon={_anon_id} -> user={res.user.id}", flush=True)
                             except Exception as e:
-                                print(f"[POSTHOG ALIAS ERROR] anon={_anon_id} user={res.user.id} errore={e}")
+                                print(f"[POSTHOG ALIAS ERROR] anon={_anon_id} user={res.user.id} errore={e}", flush=True)
                         else:
-                            print("[POSTHOG ALIAS SKIPPED] nessun ph_anon_id trovato nel cookie al momento del login")
+                            print("[POSTHOG ALIAS SKIPPED] nessun ph_anon_id trovato nel cookie al momento del login", flush=True)
                     track_event("user_signed_in")
                     # Salva i token in un cookie così il login sopravvive a un
                     # reload completo della pagina (es. ritorno da Stripe).
